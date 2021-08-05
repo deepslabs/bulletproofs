@@ -22,21 +22,20 @@ version 3 of the License, or (at your option) any later version.
 // which reduces the overall prover communication by ~15%
 //
 
+use std::ops::Mul;
 use curv::arithmetic::traits::*;
 use curv::cryptographic_primitives::hashing::hash_sha256::HSha256;
 use curv::cryptographic_primitives::hashing::traits::*;
 use curv::elliptic::curves::traits::*;
 use curv::BigInt;
 
-type GE = curv::elliptic::curves::secp256_k1::GE;
-type FE = curv::elliptic::curves::secp256_k1::FE;
-
+use serde::{Serialize, Deserialize};
 use itertools::iterate;
 
 use Errors::{self, WeightedInnerProdError};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WeightedInnerProdArg {
+pub struct WeightedInnerProdArg<GE> {
     pub(super) L: Vec<GE>,
     pub(super) R: Vec<GE>,
     pub(super) a_tag: GE,
@@ -46,7 +45,11 @@ pub struct WeightedInnerProdArg {
     pub(super) delta_prime: BigInt,
 }
 
-impl WeightedInnerProdArg {
+impl<GE> WeightedInnerProdArg<GE>
+where
+    GE: ECPoint + for<'a> Mul<&'a GE::Scalar, Output=GE> + Copy,
+    for<'a> &'a GE: Mul<&'a GE::Scalar, Output=GE>,
+{
     pub fn prove(
         G: &[GE],
         H: &[GE],
@@ -59,9 +62,9 @@ impl WeightedInnerProdArg {
         y: &BigInt,
         mut L_vec: Vec<GE>,
         mut R_vec: Vec<GE>,
-    ) -> WeightedInnerProdArg {
+    ) -> WeightedInnerProdArg<GE> {
         let n = G.len();
-        let order = FE::q();
+        let order = GE::Scalar::q();
 
         // All of the input vectors must have the same length.
         assert_eq!(H.len(), n);
@@ -97,21 +100,21 @@ impl WeightedInnerProdArg {
                 .map(|i| BigInt::mod_mul(&powers_yinv[n - 1], &a_L[i], &order))
                 .collect::<Vec<BigInt>>();
 
-            let c_L = weighted_inner_product(&a_L, &b_R, y.clone());
-            let c_R = weighted_inner_product(&yn_aR, b_L, y.clone());
+            let c_L = weighted_inner_product::<GE>(&a_L, &b_R, y.clone());
+            let c_R = weighted_inner_product::<GE>(&yn_aR, b_L, y.clone());
 
             // Note that no element in vectors a_L and b_R can be 0
             // since 0 is an invalid secret key!
             //
             // L = <yninv_aL * G_R> + <b_R * H_L> + (c_L * g) + (d_L * h)
-            let c_L_fe: FE = ECScalar::from(&c_L);
+            let c_L_fe: GE::Scalar = ECScalar::from(&c_L);
             let g_cL: GE = g * &c_L_fe;
-            let d_L_fe: FE = ECScalar::new_random();
+            let d_L_fe: GE::Scalar = ECScalar::new_random();
             let h_dL = h * &d_L_fe;
             let g_cL_h_dL = g_cL.add_point(&h_dL.get_element());
             let yninv_aL_GR = G_R.iter().zip(yninv_aL.clone()).fold(g_cL_h_dL, |acc, x| {
                 if x.1 != BigInt::zero() {
-                    let aLi: FE = ECScalar::from(&x.1);
+                    let aLi: GE::Scalar = ECScalar::from(&x.1);
                     let aLi_GRi: GE = x.0 * &aLi;
                     acc.add_point(&aLi_GRi.get_element())
                 } else {
@@ -120,7 +123,7 @@ impl WeightedInnerProdArg {
             });
             let L = H_L.iter().zip(b_R.clone()).fold(yninv_aL_GR, |acc, x| {
                 if x.1 != &BigInt::zero() {
-                    let bRi: FE = ECScalar::from(&x.1);
+                    let bRi: GE::Scalar = ECScalar::from(&x.1);
                     let bRi_HLi: GE = x.0 * &bRi;
                     acc.add_point(&bRi_HLi.get_element())
                 } else {
@@ -132,14 +135,14 @@ impl WeightedInnerProdArg {
             // since 0 is an invalid secret key!
             //
             // R = <yn_aR * G_R> + <b_R * H_L> + (c_R * g) + (d_R * h)
-            let c_R_fe: FE = ECScalar::from(&c_R);
+            let c_R_fe: GE::Scalar = ECScalar::from(&c_R);
             let g_cR: GE = g * &c_R_fe;
-            let d_R_fe: FE = ECScalar::new_random();
+            let d_R_fe: GE::Scalar = ECScalar::new_random();
             let h_dR = h * &d_R_fe;
             let g_cR_h_dR = g_cR.add_point(&h_dR.get_element());
             let aR_GL = G_L.iter().zip(yn_aR.clone()).fold(g_cR_h_dR, |acc, x| {
                 if x.1 != BigInt::zero() {
-                    let aRi: FE = ECScalar::from(&x.1);
+                    let aRi: GE::Scalar = ECScalar::from(&x.1);
                     let aRi_GLi: GE = x.0 * &aRi;
                     acc.add_point(&aRi_GLi.get_element())
                 } else {
@@ -148,7 +151,7 @@ impl WeightedInnerProdArg {
             });
             let R = H_R.iter().zip(b_L.clone()).fold(aR_GL, |acc, x| {
                 if x.1 != &BigInt::zero() {
-                    let bLi: FE = ECScalar::from(&x.1);
+                    let bLi: GE::Scalar = ECScalar::from(&x.1);
                     let bLi_HRi: GE = x.0 * &bLi;
                     acc.add_point(&bLi_HRi.get_element())
                 } else {
@@ -209,17 +212,17 @@ impl WeightedInnerProdArg {
 
             L_vec.push(L);
             R_vec.push(R);
-            return WeightedInnerProdArg::prove(
+            return WeightedInnerProdArg::<GE>::prove(
                 &G_hat, &H_hat, &g, &h, &P, &a_hat, &b_hat, &alpha_hat, &y, L_vec, R_vec,
             );
         } else {
-            let r: FE = ECScalar::new_random();
+            let r: GE::Scalar = ECScalar::new_random();
             let r_bn: BigInt = r.to_big_int();
-            let s: FE = ECScalar::new_random();
+            let s: GE::Scalar = ECScalar::new_random();
             let s_bn: BigInt = s.to_big_int();
-            let delta: FE = ECScalar::new_random();
+            let delta: GE::Scalar = ECScalar::new_random();
             let delta_bn: BigInt = delta.to_big_int();
-            let eta: FE = ECScalar::new_random();
+            let eta: GE::Scalar = ECScalar::new_random();
             let eta_bn: BigInt = eta.to_big_int();
 
             // compute A
@@ -282,7 +285,7 @@ impl WeightedInnerProdArg {
         let G = &g_vec[..];
         let H = &hi_tag[..];
         let n = G.len();
-        let order = FE::q();
+        let order = GE::Scalar::q();
 
         // All of the input vectors must have the same length.
         assert_eq!(H.len(), n);
@@ -301,13 +304,13 @@ impl WeightedInnerProdArg {
 
             let x = HSha256::create_hash_from_ge(&[&self.L[0], &self.R[0], &g, &h]);
             let x_bn = x.to_big_int();
-            let order = FE::q();
+            let order = GE::Scalar::q();
             let x_inv_fe = x.invert();
             let x_sq_bn = BigInt::mod_mul(&x_bn, &x_bn, &order);
             let x_inv_sq_bn =
                 BigInt::mod_mul(&x_inv_fe.to_big_int(), &x_inv_fe.to_big_int(), &order);
-            let x_sq_fe: FE = ECScalar::from(&x_sq_bn);
-            let x_inv_sq_fe: FE = ECScalar::from(&x_inv_sq_bn);
+            let x_sq_fe: GE::Scalar = ECScalar::from(&x_sq_bn);
+            let x_inv_sq_fe: GE::Scalar = ECScalar::from(&x_inv_sq_bn);
 
             let x_yinv = BigInt::mod_mul(&x_bn, &powers_yinv[n - 1], &order);
             let x_yinv_fe = ECScalar::from(&x_yinv);
@@ -331,7 +334,7 @@ impl WeightedInnerProdArg {
 
             let Lx_sq = &self.L[0] * &x_sq_fe;
             let Rx_sq_inv = &self.R[0] * &x_inv_sq_fe;
-            let P_tag = Lx_sq + Rx_sq_inv + P;
+            let P_tag = Lx_sq + Rx_sq_inv + *P;
 
             let ip = WeightedInnerProdArg {
                 L: (&self.L[1..]).to_vec(),
@@ -349,7 +352,7 @@ impl WeightedInnerProdArg {
         let e = HSha256::create_hash_from_ge(&[&self.a_tag, &self.b_tag, &g, &h]);
         let e_bn = e.to_big_int();
         let e_sq_bn = BigInt::mod_mul(&e_bn, &e_bn, &order);
-        let e_sq_fe: FE = ECScalar::from(&e_sq_bn);
+        let e_sq_fe: GE::Scalar = ECScalar::from(&e_sq_bn);
 
         // left hand side of verification
         // LHS = e^2*P + e*A + B
@@ -394,7 +397,7 @@ impl WeightedInnerProdArg {
         let G = &g_vec[..];
         let H = &hi_tag[..];
         let n = G.len();
-        let order = FE::q();
+        let order = GE::Scalar::q();
 
         // All of the input vectors must have the same length.
         assert_eq!(H.len(), n);
@@ -513,13 +516,17 @@ impl WeightedInnerProdArg {
     }
 }
 
-fn weighted_inner_product(a: &[BigInt], b: &[BigInt], y: BigInt) -> BigInt {
+fn weighted_inner_product<GE>(a: &[BigInt], b: &[BigInt], y: BigInt) -> BigInt
+where
+    GE: ECPoint,
+    GE::Scalar: ECScalar,
+{
     assert_eq!(
         a.len(),
         b.len(),
         "weighted_inner_product(a,b): lengths of vectors do not match"
     );
-    let order = FE::q();
+    let order = GE::Scalar::q();
     let y_powers = iterate(y.clone(), |i| i.clone() * y.clone())
         .take(a.len())
         .collect::<Vec<BigInt>>();
@@ -543,8 +550,8 @@ mod tests {
     use curv::elliptic::curves::traits::*;
     use curv::BigInt;
 
-    type GE = curv::elliptic::curves::secp256_k1::GE;
-    type FE = curv::elliptic::curves::secp256_k1::FE;
+    type GE = curv::elliptic::curves::starknet_curve::GE;
+    type FE = curv::elliptic::curves::starknet_curve::FE;
 
     use itertools::iterate;
     use proofs::range_proof::generate_random_point;
@@ -559,7 +566,7 @@ mod tests {
             .map(|i| {
                 let kzen_label_i = BigInt::from(i as u32) + &kzen_label;
                 let hash_i = HSha512::create_hash(&[&kzen_label_i]);
-                generate_random_point(&Converter::to_bytes(&hash_i))
+                generate_random_point::<GE>(&Converter::to_bytes(&hash_i))
             })
             .collect::<Vec<GE>>();
 
@@ -568,16 +575,16 @@ mod tests {
             .map(|i| {
                 let kzen_label_j = BigInt::from(n as u32) + BigInt::from(i as u32) + &kzen_label;
                 let hash_j = HSha512::create_hash(&[&kzen_label_j]);
-                generate_random_point(&Converter::to_bytes(&hash_j))
+                generate_random_point::<GE>(&Converter::to_bytes(&hash_j))
             })
             .collect::<Vec<GE>>();
 
         let label = BigInt::from(2);
         let hash = HSha512::create_hash(&[&label]);
-        let g = generate_random_point(&Converter::to_bytes(&hash));
+        let g = generate_random_point::<GE>(&Converter::to_bytes(&hash));
         let label = BigInt::from(3);
         let hash = HSha512::create_hash(&[&label]);
-        let h = generate_random_point(&Converter::to_bytes(&hash));
+        let h = generate_random_point::<GE>(&Converter::to_bytes(&hash));
 
         let a: Vec<_> = (0..n)
             .map(|_| {
@@ -595,7 +602,7 @@ mod tests {
 
         let y_scalar: BigInt =
             HSha256::create_hash_from_slice("Seed string decided by P,V!".as_bytes());
-        let c = super::weighted_inner_product(&a, &b, y_scalar.clone());
+        let c = super::weighted_inner_product::<GE>(&a, &b, y_scalar.clone());
 
         let alpha_fe: FE = ECScalar::new_random();
         let alpha = alpha_fe.to_big_int();
@@ -635,7 +642,7 @@ mod tests {
 
         let L_vec = Vec::with_capacity(n);
         let R_vec = Vec::with_capacity(n);
-        let ipp = WeightedInnerProdArg::prove(
+        let ipp = WeightedInnerProdArg::<GE>::prove(
             &g_vec, &hi_tag, &g, &h, &P, &a, &b, &alpha, &y_scalar, L_vec, R_vec,
         );
         let verifier = ipp.verify(&g_vec, &hi_tag, &g, &h, &P, &y_scalar);
@@ -650,7 +657,7 @@ mod tests {
             .map(|i| {
                 let kzen_label_i = BigInt::from(i as u32) + &kzen_label;
                 let hash_i = HSha512::create_hash(&[&kzen_label_i]);
-                generate_random_point(&Converter::to_bytes(&hash_i))
+                generate_random_point::<GE>(&Converter::to_bytes(&hash_i))
             })
             .collect::<Vec<GE>>();
 
@@ -659,16 +666,16 @@ mod tests {
             .map(|i| {
                 let kzen_label_j = BigInt::from(n as u32) + BigInt::from(i as u32) + &kzen_label;
                 let hash_j = HSha512::create_hash(&[&kzen_label_j]);
-                generate_random_point(&Converter::to_bytes(&hash_j))
+                generate_random_point::<GE>(&Converter::to_bytes(&hash_j))
             })
             .collect::<Vec<GE>>();
 
         let label = BigInt::from(2);
         let hash = HSha512::create_hash(&[&label]);
-        let g = generate_random_point(&Converter::to_bytes(&hash));
+        let g = generate_random_point::<GE>(&Converter::to_bytes(&hash));
         let label = BigInt::from(3);
         let hash = HSha512::create_hash(&[&label]);
-        let h = generate_random_point(&Converter::to_bytes(&hash));
+        let h = generate_random_point::<GE>(&Converter::to_bytes(&hash));
 
         let a: Vec<_> = (0..n)
             .map(|_| {
@@ -686,7 +693,7 @@ mod tests {
 
         let y_scalar: BigInt =
             HSha256::create_hash_from_slice("Seed string decided by P,V!".as_bytes());
-        let c = super::weighted_inner_product(&a, &b, y_scalar.clone());
+        let c = super::weighted_inner_product::<GE>(&a, &b, y_scalar.clone());
 
         let alpha_fe: FE = ECScalar::new_random();
         let alpha = alpha_fe.to_big_int();
@@ -726,7 +733,7 @@ mod tests {
 
         let L_vec = Vec::with_capacity(n);
         let R_vec = Vec::with_capacity(n);
-        let ipp = WeightedInnerProdArg::prove(
+        let ipp = WeightedInnerProdArg::<GE>::prove(
             &g_vec, &hi_tag, &g, &h, &P, &a, &b, &alpha, &y_scalar, L_vec, R_vec,
         );
         let verifier = ipp.fast_verify(&g_vec, &hi_tag, &g, &h, &P, &y_scalar);
@@ -741,7 +748,7 @@ mod tests {
             .map(|i| {
                 let kzen_label_i = BigInt::from(i as u32) + &kzen_label;
                 let hash_i = HSha512::create_hash(&[&kzen_label_i]);
-                generate_random_point(&Converter::to_bytes(&hash_i))
+                generate_random_point::<GE>(&Converter::to_bytes(&hash_i))
             })
             .collect::<Vec<GE>>();
 
@@ -750,21 +757,21 @@ mod tests {
             .map(|i| {
                 let kzen_label_j = BigInt::from(n as u32) + BigInt::from(i as u32) + &kzen_label;
                 let hash_j = HSha512::create_hash(&[&kzen_label_j]);
-                generate_random_point(&Converter::to_bytes(&hash_j))
+                generate_random_point::<GE>(&Converter::to_bytes(&hash_j))
             })
             .collect::<Vec<GE>>();
 
         // generate g, h
         let label = BigInt::from(2);
         let hash = HSha512::create_hash(&[&label]);
-        let g = generate_random_point(&Converter::to_bytes(&hash));
+        let g = generate_random_point::<GE>(&Converter::to_bytes(&hash));
         let label = BigInt::from(3);
         let hash = HSha512::create_hash(&[&label]);
-        let h = generate_random_point(&Converter::to_bytes(&hash));
+        let h = generate_random_point::<GE>(&Converter::to_bytes(&hash));
 
         let y_scalar: BigInt =
             HSha256::create_hash_from_slice("Seed string decided by P,V!".as_bytes());
-        let c = super::weighted_inner_product(&a, &b, y_scalar.clone());
+        let c = super::weighted_inner_product::<GE>(&a, &b, y_scalar.clone());
 
         let alpha_fe: FE = ECScalar::new_random();
         let alpha = alpha_fe.to_big_int();
@@ -804,7 +811,7 @@ mod tests {
 
         let L_vec = Vec::with_capacity(n);
         let R_vec = Vec::with_capacity(n);
-        let ipp = WeightedInnerProdArg::prove(
+        let ipp = WeightedInnerProdArg::<GE>::prove(
             &g_vec, &hi_tag, &g, &h, &P, &a, &b, &alpha, &y_scalar, L_vec, R_vec,
         );
         let verifier = ipp.verify(&g_vec, &hi_tag, &g, &h, &P, &y_scalar);
@@ -839,7 +846,7 @@ mod tests {
         ];
         assert_eq!(y_powers, expect_y_powers, "Scalar powers of y fails!");
 
-        let a_weighted_b = weighted_inner_product(&a, &b, y.clone());
+        let a_weighted_b = weighted_inner_product::<GE>(&a, &b, y.clone());
         assert_eq!(
             a_weighted_b,
             BigInt::from(46),
